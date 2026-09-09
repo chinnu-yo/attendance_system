@@ -1,7 +1,7 @@
 import uuid
 import numpy as np
 from typing import List, Optional
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException, status
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, status, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -13,7 +13,14 @@ try:
         get_db_connection,
         get_student_prototypes,
         add_student_prototype,
-        update_student_prototype
+        update_student_prototype,
+        get_all_students_summary,
+        get_student_detail,
+        update_student,
+        delete_student,
+        update_session_record,
+        get_analytics_overview,
+        generate_csv_report
     )
     from backend.vision_service import VisionEngine
     from backend.matcher import process_attendance_matching
@@ -25,15 +32,22 @@ except ImportError:
         get_db_connection,
         get_student_prototypes,
         add_student_prototype,
-        update_student_prototype
+        update_student_prototype,
+        get_all_students_summary,
+        get_student_detail,
+        update_student,
+        delete_student,
+        update_session_record,
+        get_analytics_overview,
+        generate_csv_report
     )
     from vision_service import VisionEngine
     from matcher import process_attendance_matching
 
 app = FastAPI(
-    title="VisionAttendance API",
-    description="Automated classroom attendance system using InsightFace, Multi-Prototype Galleries, & Adaptive Feedback Learning.",
-    version="1.1.0"
+    title="VisionAttendance SaaS API",
+    description="Production-ready automated classroom attendance management platform.",
+    version="2.0.0"
 )
 
 # CORS configuration allowing local Next.js frontend
@@ -58,6 +72,10 @@ def health_check():
     return {"status": "ok", "onnx_engine": "InsightFace CPU (buffalo_l, det_thresh=0.60)"}
 
 
+# ==============================================================================
+# Student Enrollment & Attendance Pipeline
+# ==============================================================================
+
 @app.post("/api/students/enroll", status_code=status.HTTP_201_CREATED)
 async def enroll_student(
     roll_number: str = Form(...),
@@ -67,7 +85,7 @@ async def enroll_student(
 ):
     """
     Enrolls a student into a course with 1 to 3 headshot images.
-    Extracts, averages, and L2-normalizes 512-D vectors, then persists into SQLite student_embeddings.
+    Extracts, averages, and L2-normalizes 512-D vectors, then persists into SQLite.
     """
     if not (1 <= len(photos) <= 3):
         raise HTTPException(
@@ -113,7 +131,7 @@ async def process_attendance(
     images: List[UploadFile] = File(...)
 ):
     """
-    Processes multi-photo classroom attendance against enrolled course roster with multi-prototype galleries.
+    Processes multi-photo classroom attendance against enrolled course roster.
     Caches detected face crops in session memory for adaptive learning on commitment.
     """
     if not images:
@@ -184,8 +202,7 @@ class CommitAttendanceRequest(BaseModel):
 @app.post("/api/attendance/commit", status_code=status.HTTP_200_OK)
 async def commit_attendance(payload: CommitAttendanceRequest):
     """
-    Persists finalized attendance records into SQLite and executes the Adaptive Feedback Learning Loop
-    for instructor manual overrides.
+    Persists finalized attendance records into SQLite and executes the Adaptive Feedback Learning Loop.
     """
     session_id = f"sess_{uuid.uuid4().hex[:12]}"
     vision_engine = VisionEngine.get_instance()
@@ -224,24 +241,20 @@ async def commit_attendance(payload: CommitAttendanceRequest):
 
             # Adaptive Feedback Learning Loop: Trigger on manual override to PRESENT
             if rec.override and rec.status == 'PRESENT':
-                # Filter quality face crops (size >= 50x50 and det_score >= 0.70)
                 eligible_crops = [
                     d for d in cached_detections
                     if d["width"] >= 50 and d["height"] >= 50 and d["det_score"] >= 0.70
                 ]
 
                 if eligible_crops:
-                    # Pick highest scoring face crop
                     best_crop = max(eligible_crops, key=lambda d: d["det_score"])
                     crop_embedding = best_crop["embedding"]
 
                     existing_prototypes = get_student_prototypes(rec.student_id)
                     if len(existing_prototypes) < 5:
-                        # Insert new prototype vector
                         add_student_prototype(rec.student_id, crop_embedding, conn=conn)
                         learned_prototypes += 1
                     elif len(existing_prototypes) == 5:
-                        # Update closest vector using running average: E_new = normalize(0.8 * E_closest + 0.2 * E_crop)
                         sims = [
                             (float(np.dot(p["embedding"], crop_embedding)), p)
                             for p in existing_prototypes
@@ -267,3 +280,107 @@ async def commit_attendance(payload: CommitAttendanceRequest):
         "learned_prototypes": learned_prototypes,
         "timestamp": f"{uuid.uuid1()}"
     }
+
+
+# ==============================================================================
+# Production SaaS Extensions: Student Management & History
+# ==============================================================================
+
+@app.get("/api/students", status_code=status.HTTP_200_OK)
+def get_students(course_id: Optional[str] = Query(None)):
+    """Fetch all students with attendance %, present counts, and prototype counts."""
+    students = get_all_students_summary(course_id=course_id)
+    return {"students": students}
+
+
+@app.get("/api/students/{student_id}", status_code=status.HTTP_200_OK)
+def get_student(student_id: str):
+    """Retrieve detailed student info, registered prototypes, and attendance history."""
+    student_detail = get_student_detail(student_id)
+    if not student_detail:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found.")
+    return student_detail
+
+
+class UpdateStudentRequest(BaseModel):
+    name: str
+    roll_number: str
+
+
+@app.put("/api/students/{student_id}", status_code=status.HTTP_200_OK)
+def update_student_endpoint(student_id: str, payload: UpdateStudentRequest):
+    """Update student name or roll number."""
+    success = update_student(student_id, payload.name.trim() if hasattr(payload.name, 'trim') else payload.name.strip(), payload.roll_number.strip())
+    if not success:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found.")
+    return {"status": "success", "message": "Student updated successfully."}
+
+
+@app.delete("/api/students/{student_id}", status_code=status.HTTP_200_OK)
+def delete_student_endpoint(student_id: str):
+    """Delete student and cascading records."""
+    success = delete_student(student_id)
+    if not success:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found.")
+    return {"status": "success", "message": "Student deleted successfully."}
+
+
+@app.post("/api/students/{student_id}/prototype", status_code=status.HTTP_201_CREATED)
+async def add_student_prototype_endpoint(student_id: str, photo: UploadFile = File(...)):
+    """Uploads an extra headshot image to add to student's vector prototypes."""
+    content = await photo.read()
+    vision_engine = VisionEngine.get_instance()
+    try:
+        embedding = vision_engine.extract_average_embedding([content])
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Face extraction failed: {str(e)}")
+
+    existing_prototypes = get_student_prototypes(student_id)
+    if len(existing_prototypes) >= 5:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Student already has the maximum 5 prototype embeddings registered."
+        )
+
+    emb_id = add_student_prototype(student_id, embedding)
+    return {
+        "status": "success",
+        "embedding_id": emb_id,
+        "message": "Extra prototype headshot added successfully."
+    }
+
+
+class UpdateRecordRequest(BaseModel):
+    status: str
+    override_reason: Optional[str] = "Manual teacher override"
+
+
+@app.put("/api/attendance/records/{record_id}", status_code=status.HTTP_200_OK)
+def update_attendance_record_endpoint(record_id: str, payload: UpdateRecordRequest):
+    """Modifies historical session log status & override flag."""
+    success = update_session_record(record_id, payload.status, payload.override_reason)
+    if not success:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attendance record not found.")
+    return {"status": "success", "message": "Attendance record updated successfully."}
+
+
+# ==============================================================================
+# Analytics & CSV Export
+# ==============================================================================
+
+@app.get("/api/analytics/overview", status_code=status.HTTP_200_OK)
+def get_analytics_overview_endpoint(course_id: Optional[str] = Query(None)):
+    """Computes total sessions, average class attendance rate, defaulters list, and daily stats."""
+    return get_analytics_overview(course_id=course_id)
+
+
+@app.get("/api/analytics/export")
+def export_csv_report(course_id: Optional[str] = Query(None)):
+    """Generates downloadable CSV spreadsheet report of all student attendance records."""
+    csv_content = generate_csv_report(course_id=course_id)
+    filename = f"attendance_report_{course_id or 'all'}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )

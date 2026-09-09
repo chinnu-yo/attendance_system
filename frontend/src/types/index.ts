@@ -62,3 +62,55 @@ export interface CommitAttendanceResponse {
   committed_records: number;
   timestamp: string;
 }
+
+export interface StudentSummary {
+  student_id: string;
+  roll_number: string;
+  name: string;
+  course_id?: string | null;
+  created_at: string;
+  total_sessions: number;
+  present_count: number;
+  attendance_percentage: number;
+  num_embeddings: number;
+}
+
+export interface AttendanceRecord {
+  record_id: string;
+  session_id: string;
+  timestamp: string;
+  course_id: string;
+  status: 'PRESENT' | 'ABSENT' | 'REVIEW_NEEDED';
+  confidence_score: number;
+  is_override: boolean;
+  override_reason?: string | null;
+}
+
+export interface StudentDetail {
+  student_id: string;
+  roll_number: string;
+  name: string;
+  course_id?: string | null;
+  created_at: string;
+  embeddings: Array<{
+    embedding_id: string;
+    created_at: string;
+  }>;
+  history: AttendanceRecord[];
+}
+
+export interface SessionTrend {
+  date: string;
+  attendance_rate: number;
+  total_sessions: number;
+}
+
+export interface AnalyticsOverview {
+  total_students: number;
+  total_sessions: number;
+  overall_attendance_rate: number;
+  defaulters_count: number;
+  defaulters: StudentSummary[];
+  session_trends: SessionTrend[];
+}
+
