@@ -157,17 +157,14 @@ async def process_attendance(
         except Exception as e:
             detected_faces = []
 
-        images_data.append({
-            "image_id": image_id,
-            "image_filename": img_file.filename or f"photo_{idx + 1}.jpg",
-            "faces": detected_faces
-        })
-
-        for face in detected_faces:
+        for face_idx, face in enumerate(detected_faces):
+            crop_id = f"{image_id}_crop_{face_idx}"
+            face["crop_id"] = crop_id
             bbox = face["bbox"]
             w = bbox[2] - bbox[0]
             h = bbox[3] - bbox[1]
             flattened_cached_faces.append({
+                "crop_id": crop_id,
                 "image_id": image_id,
                 "bbox": bbox,
                 "width": w,
@@ -175,6 +172,12 @@ async def process_attendance(
                 "det_score": face["det_score"],
                 "embedding": face["embedding"]
             })
+
+        images_data.append({
+            "image_id": image_id,
+            "image_filename": img_file.filename or f"photo_{idx + 1}.jpg",
+            "faces": detected_faces
+        })
 
     # Cache detections in session memory
     session_token = f"stok_{uuid.uuid4().hex[:12]}"
@@ -184,6 +187,11 @@ async def process_attendance(
     results = process_attendance_matching(images_data, enrolled_students)
     results["session_token"] = session_token
     return results
+
+
+class CropAssignment(BaseModel):
+    student_id: str
+    crop_id: str
 
 
 class CommitRecordItem(BaseModel):
@@ -196,6 +204,7 @@ class CommitRecordItem(BaseModel):
 class CommitAttendanceRequest(BaseModel):
     course_id: str
     records: List[CommitRecordItem]
+    assignments: Optional[List[CropAssignment]] = []
     session_token: Optional[str] = None
 
 
@@ -207,6 +216,12 @@ async def commit_attendance(payload: CommitAttendanceRequest):
     session_id = f"sess_{uuid.uuid4().hex[:12]}"
     vision_engine = VisionEngine.get_instance()
     cached_detections = vision_engine.get_session_cache(payload.session_token) if payload.session_token else []
+
+    # Map student_id -> crop_id from explicit UI assignments
+    assignment_map: Dict[str, str] = {}
+    if payload.assignments:
+        for assg in payload.assignments:
+            assignment_map[assg.student_id] = assg.crop_id
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -239,21 +254,44 @@ async def commit_attendance(payload: CommitAttendanceRequest):
             )
             committed_records += 1
 
-            # Adaptive Feedback Learning Loop: Trigger on manual override to PRESENT
+            # Adaptive Feedback Learning Loop: Trigger when status is PRESENT via override/assignment
             if rec.override and rec.status == 'PRESENT':
-                eligible_crops = [
-                    d for d in cached_detections
-                    if d["width"] >= 50 and d["height"] >= 50 and d["det_score"] >= 0.70
-                ]
+                crop_embedding = None
 
-                if eligible_crops:
-                    best_crop = max(eligible_crops, key=lambda d: d["det_score"])
-                    crop_embedding = best_crop["embedding"]
+                # Priority 1: Explicit crop assignment for this student_id
+                if rec.student_id in assignment_map:
+                    target_crop_id = assignment_map[rec.student_id]
+                    matching_crops = [d for d in cached_detections if d.get("crop_id") == target_crop_id]
+                    if matching_crops:
+                        crop_embedding = matching_crops[0]["embedding"]
 
+                # Priority 2: Fallback similarity matching against student's existing prototypes
+                if crop_embedding is None:
+                    existing_prototypes = get_student_prototypes(rec.student_id)
+                    eligible_crops = [
+                        d for d in cached_detections
+                        if d.get("width", 0) >= 32 and d.get("height", 0) >= 32 and d.get("det_score", 1.0) >= 0.50
+                    ]
+                    if eligible_crops and existing_prototypes:
+                        proto_matrix = np.stack([p["embedding"] for p in existing_prototypes], axis=0) # (K, 512)
+                        best_sim = -1.0
+                        best_candidate = None
+                        for d in eligible_crops:
+                            sims = np.dot(proto_matrix, d["embedding"])
+                            max_sim = float(np.max(sims))
+                            if max_sim > best_sim:
+                                best_sim = max_sim
+                                best_candidate = d
+                        if best_candidate:
+                            crop_embedding = best_candidate["embedding"]
+
+                # Perform vector prototype insertion or running average update
+                if crop_embedding is not None:
                     existing_prototypes = get_student_prototypes(rec.student_id)
                     if len(existing_prototypes) < 5:
                         add_student_prototype(rec.student_id, crop_embedding, conn=conn)
                         learned_prototypes += 1
+                        print(f"[ADAPTIVE] Stored verified prototype for {rec.student_id}")
                     elif len(existing_prototypes) == 5:
                         sims = [
                             (float(np.dot(p["embedding"], crop_embedding)), p)
@@ -270,6 +308,7 @@ async def commit_attendance(payload: CommitAttendanceRequest):
                         
                         update_student_prototype(closest_proto["embedding_id"], e_new.astype(np.float32), conn=conn)
                         learned_prototypes += 1
+                        print(f"[ADAPTIVE] Stored verified prototype for {rec.student_id}")
             
         conn.commit()
 

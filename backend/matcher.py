@@ -1,8 +1,8 @@
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-PRESENT_THRESHOLD = 0.58
-REVIEW_THRESHOLD = 0.45
+PRESENT_THRESHOLD = 0.52
+REVIEW_THRESHOLD = 0.40
 
 
 def compute_multi_prototype_similarity_matrix(
@@ -55,7 +55,7 @@ def process_attendance_matching(
     images_data: List of Dicts with:
         "image_id": str,
         "image_filename": str,
-        "faces": List[Dict] with "bbox", "embedding", "det_score"
+        "faces": List[Dict] with "bbox", "embedding", "det_score", optional "crop_id"
 
     enrolled_students: List of Dicts with:
         "student_id": str,
@@ -73,10 +73,12 @@ def process_attendance_matching(
         faces = img_info["faces"]
         total_detected_faces += len(faces)
         for face_idx, face in enumerate(faces):
+            crop_id = face.get("crop_id", f"{img_info['image_id']}_crop_{face_idx}")
             all_detections.append({
                 "global_idx": len(all_detections),
                 "image_idx": img_idx,
                 "face_idx": face_idx,
+                "crop_id": crop_id,
                 "image_id": img_info["image_id"],
                 "bbox": face["bbox"],
                 "embedding": face["embedding"],
@@ -92,6 +94,7 @@ def process_attendance_matching(
                 "image_filename": img_info["image_filename"],
                 "faces": [
                     {
+                        "crop_id": f.get("crop_id", f"{img_info['image_id']}_crop_{idx}"),
                         "bbox": f["bbox"],
                         "matched_student_id": None,
                         "roll_number": None,
@@ -99,7 +102,7 @@ def process_attendance_matching(
                         "confidence": float(round(f["det_score"], 2)),
                         "status": "UNRECOGNIZED"
                     }
-                    for f in img_info["faces"]
+                    for idx, f in enumerate(img_info["faces"])
                 ]
             })
         return {
@@ -150,7 +153,8 @@ def process_attendance_matching(
             "name": student["name"],
             "confidence": round(score, 2),
             "status": status,
-            "image_id": det["image_id"]
+            "image_id": det["image_id"],
+            "crop_id": det["crop_id"]
         }
 
         assigned_detections[d_idx] = match_info
@@ -166,9 +170,11 @@ def process_attendance_matching(
                 d["global_idx"] for d in all_detections
                 if d["image_idx"] == img_idx and d["face_idx"] == face_idx
             )
+            crop_id = all_detections[g_idx]["crop_id"]
             if g_idx in assigned_detections:
                 match = assigned_detections[g_idx]
                 img_faces.append({
+                    "crop_id": crop_id,
                     "bbox": face["bbox"],
                     "matched_student_id": match["student_id"],
                     "roll_number": match["roll_number"],
@@ -179,6 +185,7 @@ def process_attendance_matching(
             else:
                 max_score = float(sim_matrix[g_idx].max()) if sim_matrix.size > 0 else 0.0
                 img_faces.append({
+                    "crop_id": crop_id,
                     "bbox": face["bbox"],
                     "matched_student_id": None,
                     "roll_number": None,

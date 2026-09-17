@@ -40,6 +40,7 @@ export default function AttendanceDashboardPage() {
   const [pipelineData, setPipelineData] = useState<ProcessAttendanceResponse | null>(null);
   const [roster, setRoster] = useState<RosterStudent[]>([]);
   const [overrides, setOverrides] = useState<Record<string, { status: 'PRESENT' | 'ABSENT'; reason: string }>>({});
+  const [assignments, setAssignments] = useState<Array<{ student_id: string; crop_id: string }>>([]);
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
 
@@ -86,6 +87,7 @@ export default function AttendanceDashboardPage() {
       setPipelineData(res);
       setRoster(res.roster);
       setOverrides({});
+      setAssignments([]);
     } catch (err: any) {
       setProcessingError(err.message || 'Attendance processing failed.');
     } finally {
@@ -115,6 +117,57 @@ export default function AttendanceDashboardPage() {
     }));
   };
 
+  const handleAssignCrop = (cropId: string, studentId: string) => {
+    const studentInfo = roster.find((s) => s.student_id === studentId);
+    const studentName = studentInfo ? studentInfo.name : 'Enrolled Student';
+
+    // 1. Update roster status immediately
+    setRoster((prev) =>
+      prev.map((s) =>
+        s.student_id === studentId
+          ? { ...s, status: 'PRESENT', confidence: 1.0 }
+          : s
+      )
+    );
+
+    // 2. Update pipelineData canvas face box to green PRESENT with student name
+    if (pipelineData) {
+      setPipelineData({
+        ...pipelineData,
+        processed_images: pipelineData.processed_images.map((img) => ({
+          ...img,
+          faces: img.faces.map((face) => {
+            if (face.crop_id === cropId) {
+              return {
+                ...face,
+                matched_student_id: studentId,
+                name: studentName,
+                confidence: 1.0,
+                status: 'PRESENT',
+              };
+            }
+            return face;
+          }),
+        })),
+      });
+    }
+
+    // 3. Register manual override
+    setOverrides((prev) => ({
+      ...prev,
+      [studentId]: {
+        status: 'PRESENT',
+        reason: 'Explicit Visual Canvas Attribution',
+      },
+    }));
+
+    // 4. Record explicit crop assignment payload
+    setAssignments((prev) => [
+      ...prev.filter((a) => a.student_id !== studentId && a.crop_id !== cropId),
+      { student_id: studentId, crop_id: cropId },
+    ]);
+  };
+
   const handleCommitAttendance = async () => {
     if (!pipelineData || roster.length === 0) return;
 
@@ -129,6 +182,8 @@ export default function AttendanceDashboardPage() {
         override: !!overrides[student.student_id],
         override_reason: overrides[student.student_id]?.reason,
       })),
+      assignments: assignments,
+      session_token: pipelineData.session_token,
     };
 
     try {
@@ -360,8 +415,10 @@ export default function AttendanceDashboardPage() {
                 <CanvasInspector
                   images={pipelineData.processed_images}
                   imageFiles={stagedFiles}
+                  roster={roster}
                   selectedStudentId={selectedStudentId}
                   onSelectStudent={setSelectedStudentId}
+                  onAssignCrop={handleAssignCrop}
                 />
               </div>
             )}

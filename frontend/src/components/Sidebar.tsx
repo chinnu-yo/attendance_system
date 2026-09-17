@@ -19,21 +19,31 @@ export default function Sidebar() {
   const pathname = usePathname();
   const [engineStatus, setEngineStatus] = useState<{ status: string; engine: string } | null>(null);
 
+  const isHealthy = engineStatus?.status === 'healthy' || engineStatus?.status === 'ok';
+
   useEffect(() => {
     let isMounted = true;
-    checkHealth()
-      .then((data) => {
-        if (isMounted) {
-          setEngineStatus({ status: data.status, engine: data.onnx_engine });
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
-          setEngineStatus({ status: 'offline', engine: 'InsightFace (Disconnected)' });
-        }
-      });
+
+    const fetchStatus = () => {
+      checkHealth()
+        .then((data) => {
+          if (isMounted) {
+            setEngineStatus({ status: data.status, engine: data.onnx_engine });
+          }
+        })
+        .catch(() => {
+          if (isMounted) {
+            setEngineStatus({ status: 'offline', engine: 'InsightFace (Disconnected)' });
+          }
+        });
+    };
+
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 10000);
+
     return () => {
       isMounted = false;
+      clearInterval(interval);
     };
   }, []);
 
@@ -125,12 +135,12 @@ export default function Sidebar() {
           <span className="flex h-2 w-2 relative">
             <span
               className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                engineStatus?.status === 'healthy' ? 'bg-emerald-400' : 'bg-amber-400'
+                isHealthy ? 'bg-emerald-400' : 'bg-amber-400'
               }`}
             ></span>
             <span
               className={`relative inline-flex rounded-full h-2 w-2 ${
-                engineStatus?.status === 'healthy' ? 'bg-emerald-500' : 'bg-amber-500'
+                isHealthy ? 'bg-emerald-500' : 'bg-amber-500'
               }`}
             ></span>
           </span>

@@ -1,27 +1,35 @@
 'use client';
 
 import React, { useRef, useEffect, useState } from 'react';
-import { ProcessedImage, DetectedFace } from '@/types';
-import { Eye, Layers, ZoomIn, ZoomOut, RotateCcw, Move } from 'lucide-react';
+import { ProcessedImage, DetectedFace, RosterStudent } from '@/types';
+import { Eye, Layers, ZoomIn, ZoomOut, RotateCcw, Move, UserCheck, X, Check } from 'lucide-react';
 
 interface CanvasInspectorProps {
   images: ProcessedImage[];
   imageFiles: File[];
+  roster?: RosterStudent[];
   selectedStudentId?: string | null;
   onSelectStudent?: (studentId: string | null) => void;
+  onAssignCrop?: (cropId: string, studentId: string) => void;
 }
 
 export function CanvasInspector({
   images,
   imageFiles,
+  roster = [],
   selectedStudentId,
   onSelectStudent,
+  onAssignCrop,
 }: CanvasInspectorProps) {
   const [activeImageIndex, setActiveImageIndex] = useState<number>(0);
   const [zoom, setZoom] = useState<number>(1.0);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Attribution popover state
+  const [clickedFace, setClickedFace] = useState<DetectedFace | null>(null);
+  const [targetStudentId, setTargetStudentId] = useState<string>('');
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -53,6 +61,89 @@ export function CanvasInspector({
 
   const handleMouseUp = () => setIsDragging(false);
 
+  // Canvas click detection for bounding box attribution
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (isDragging) return;
+    if (!canvasRef.current || !activeProcessedImage) return;
+
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+
+    // Mouse position within the rendered canvas element
+    const clientX = e.clientX - rect.left;
+    const clientY = e.clientY - rect.top;
+
+    // Invert zoom and pan transformations if applied
+    const transformedX = (clientX - pan.x) / zoom;
+    const transformedY = (clientY - pan.y) / zoom;
+
+    // Scale from display CSS pixels to intrinsic canvas/image resolution
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    const imgX = transformedX * scaleX;
+    const imgY = transformedY * scaleY;
+
+    // Find all candidate boxes containing (imgX, imgY)
+    const hits = activeProcessedImage.faces.filter((face) => {
+      const [x1, y1, x2, y2] = face.bbox;
+      return imgX >= x1 && imgX <= x2 && imgY >= y1 && imgY <= y2;
+    });
+
+    if (hits.length > 0) {
+      // Select box whose center is closest to (imgX, imgY)
+      const selectedFace = hits.sort((a, b) => {
+        const centerA = [(a.bbox[0] + a.bbox[2]) / 2, (a.bbox[1] + a.bbox[3]) / 2];
+        const centerB = [(b.bbox[0] + b.bbox[2]) / 2, (b.bbox[1] + b.bbox[3]) / 2];
+        const distA = Math.hypot(imgX - centerA[0], imgY - centerA[1]);
+        const distB = Math.hypot(imgX - centerB[0], imgY - centerB[1]);
+        return distA - distB;
+      })[0];
+
+      setClickedFace(selectedFace);
+      setTargetStudentId(selectedFace.matched_student_id || '');
+      if (onSelectStudent && selectedFace.matched_student_id) {
+        onSelectStudent(selectedFace.matched_student_id);
+      }
+    }
+  };
+
+  // Hover cursor feedback handler
+  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (isDragging) return;
+    if (!canvasRef.current || !activeProcessedImage) return;
+
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+
+    const clientX = e.clientX - rect.left;
+    const clientY = e.clientY - rect.top;
+
+    const transformedX = (clientX - pan.x) / zoom;
+    const transformedY = (clientY - pan.y) / zoom;
+
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    const imgX = transformedX * scaleX;
+    const imgY = transformedY * scaleY;
+
+    const isHovering = activeProcessedImage.faces.some((face) => {
+      const [x1, y1, x2, y2] = face.bbox;
+      return imgX >= x1 && imgX <= x2 && imgY >= y1 && imgY <= y2;
+    });
+
+    canvas.style.cursor = isHovering ? 'pointer' : zoom > 1.0 ? 'grab' : 'default';
+  };
+
+  const handleExecuteAssignment = () => {
+    if (!clickedFace || !targetStudentId || !onAssignCrop) return;
+    const cropId = clickedFace.crop_id || `img_${activeImageIndex}_crop_${clickedFace.bbox.join('_')}`;
+    onAssignCrop(cropId, targetStudentId);
+    setClickedFace(null);
+    setTargetStudentId('');
+  };
+
   // Draw bounding boxes on canvas whenever active image, zoom, pan, or selected student changes
   useEffect(() => {
     if (!canvasRef.current || !activeImageFile || !activeProcessedImage) return;
@@ -66,36 +157,40 @@ export function CanvasInspector({
     img.src = objectUrl;
 
     img.onload = () => {
-      // Determine canvas display dimensions
-      const containerWidth = containerRef.current?.clientWidth || 800;
-      const aspectRatio = img.naturalHeight / img.naturalWidth;
-      const baseCanvasWidth = containerWidth;
-      const baseCanvasHeight = containerWidth * aspectRatio;
-
-      canvas.width = baseCanvasWidth * zoom;
-      canvas.height = baseCanvasHeight * zoom;
+      // Set canvas intrinsic resolution to original image dimensions
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.save();
 
+      // Calculate conversion from CSS display pixels to canvas intrinsic pixels
+      const rect = canvas.getBoundingClientRect();
+      const cssToCanvasX = rect.width > 0 ? canvas.width / rect.width : 1;
+      const cssToCanvasY = rect.height > 0 ? canvas.height / rect.height : 1;
+
       // Apply Zoom & Pan Transformations
-      ctx.translate(pan.x, pan.y);
+      ctx.translate(pan.x * cssToCanvasX, pan.y * cssToCanvasY);
+      ctx.scale(zoom, zoom);
 
-      // Draw scaled image
-      ctx.drawImage(img, 0, 0, baseCanvasWidth * zoom, baseCanvasHeight * zoom);
+      // Draw original image at 1:1 intrinsic resolution
+      ctx.drawImage(img, 0, 0, img.naturalWidth, img.naturalHeight);
 
-      const scaleX = (baseCanvasWidth * zoom) / img.naturalWidth;
-      const scaleY = (baseCanvasHeight * zoom) / img.naturalHeight;
+      // Scale UI elements relative to image size so tags remain readable
+      const scaleFactor = Math.max(1, img.naturalWidth / 1000);
+      const fontSize = Math.max(12, Math.round((14 * scaleFactor) / zoom));
+      const padX = Math.round((8 * scaleFactor) / zoom);
+      const tagHeight = Math.round((24 * scaleFactor) / zoom);
 
       // Render detection bounding boxes
       activeProcessedImage.faces.forEach((face) => {
         const [x1, y1, x2, y2] = face.bbox;
-        const bx = x1 * scaleX;
-        const by = y1 * scaleY;
-        const bw = (x2 - x1) * scaleX;
-        const bh = (y2 - y1) * scaleY;
+        const bw = x2 - x1;
+        const bh = y2 - y1;
 
-        const isSelected = selectedStudentId && face.matched_student_id === selectedStudentId;
+        const isSelected =
+          (selectedStudentId && face.matched_student_id === selectedStudentId) ||
+          (clickedFace && clickedFace.crop_id === face.crop_id);
 
         // Choose color based on status
         let strokeColor = '#f43f5e'; // Rose for UNRECOGNIZED
@@ -111,12 +206,12 @@ export function CanvasInspector({
         // Draw Bounding Box Rectangle
         ctx.save();
         ctx.strokeStyle = strokeColor;
-        ctx.lineWidth = isSelected ? 4 : 2;
+        ctx.lineWidth = ((isSelected ? 5 : 3) * scaleFactor) / zoom;
         if (isSelected) {
           ctx.shadowColor = strokeColor;
-          ctx.shadowBlur = 12;
+          ctx.shadowBlur = (12 * scaleFactor) / zoom;
         }
-        ctx.strokeRect(bx, by, bw, bh);
+        ctx.strokeRect(x1, y1, bw, bh);
         ctx.restore();
 
         // Prepare Tag Text
@@ -126,32 +221,31 @@ export function CanvasInspector({
             ? `Unknown (${confPercent}%)`
             : `${face.name} (${confPercent}%)`;
 
-        ctx.font = 'bold 12px system-ui, sans-serif';
+        ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
         const textMetrics = ctx.measureText(tagText);
-        const padX = 8;
-        const tagHeight = 20;
         const tagWidth = textMetrics.width + padX * 2;
 
         // Draw Tag Background
-        const tagY = by - tagHeight > 0 ? by - tagHeight : by;
+        const tagY = y1 - tagHeight > 0 ? y1 - tagHeight : y1;
         ctx.fillStyle = bgColor;
         ctx.beginPath();
+        const borderRadius = Math.round((4 * scaleFactor) / zoom);
         if (typeof ctx.roundRect === 'function') {
-          ctx.roundRect(bx, tagY, tagWidth, tagHeight, 4);
+          ctx.roundRect(x1, tagY, tagWidth, tagHeight, borderRadius);
         } else {
-          ctx.rect(bx, tagY, tagWidth, tagHeight);
+          ctx.rect(x1, tagY, tagWidth, tagHeight);
         }
         ctx.fill();
 
         // Draw Tag Text
         ctx.fillStyle = '#ffffff';
-        ctx.fillText(tagText, bx + padX, tagY + 14);
+        ctx.fillText(tagText, x1 + padX, tagY + tagHeight * 0.7);
       });
 
       ctx.restore();
       URL.revokeObjectURL(objectUrl);
     };
-  }, [activeImageIndex, activeImageFile, activeProcessedImage, selectedStudentId, zoom, pan]);
+  }, [activeImageIndex, activeImageFile, activeProcessedImage, selectedStudentId, clickedFace, zoom, pan]);
 
   if (!images || images.length === 0 || !imageFiles || imageFiles.length === 0) {
     return (
@@ -166,7 +260,7 @@ export function CanvasInspector({
   }
 
   return (
-    <div className="flex flex-col space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 backdrop-blur">
+    <div className="flex flex-col space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 backdrop-blur relative">
       {/* Header & Controls Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-zinc-800 pb-3 gap-3">
         <div className="flex items-center space-x-2">
@@ -213,6 +307,7 @@ export function CanvasInspector({
                 onClick={() => {
                   setActiveImageIndex(idx);
                   handleResetZoom();
+                  setClickedFace(null);
                 }}
                 className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
                   activeImageIndex === idx
@@ -227,25 +322,25 @@ export function CanvasInspector({
         </div>
       </div>
 
-      {/* Legend & Pan Notice Bar */}
+      {/* Legend Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 bg-zinc-950 rounded-lg text-xs border border-zinc-800/80">
         <div className="flex items-center space-x-5">
           <div className="flex items-center space-x-2">
             <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 inline-block shadow-sm"></span>
-            <span className="text-zinc-300 font-medium">Present (≥ 0.58)</span>
+            <span className="text-zinc-300 font-medium">Present (≥ 0.52)</span>
           </div>
           <div className="flex items-center space-x-2">
             <span className="h-2.5 w-2.5 rounded-full bg-amber-500 inline-block shadow-sm"></span>
-            <span className="text-zinc-300 font-medium">Review Needed (0.45 - 0.57)</span>
+            <span className="text-zinc-300 font-medium">Review Needed (0.40 - 0.51)</span>
           </div>
           <div className="flex items-center space-x-2">
             <span className="h-2.5 w-2.5 rounded-full bg-rose-500 inline-block shadow-sm"></span>
-            <span className="text-zinc-300 font-medium">Unrecognized (&lt; 0.45)</span>
+            <span className="text-zinc-300 font-medium">Unrecognized (&lt; 0.40)</span>
           </div>
         </div>
         <div className="flex items-center gap-1.5 text-zinc-500 text-[11px]">
           <Move className="w-3 h-3 text-cyan-400" />
-          <span>Click &amp; drag canvas to pan when zoomed</span>
+          <span>Click bounding box to assign student • Drag to pan</span>
         </div>
       </div>
 
@@ -256,11 +351,86 @@ export function CanvasInspector({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
-        className={`relative w-full overflow-hidden rounded-lg bg-zinc-950 border border-zinc-800 flex justify-center items-center min-h-[420px] ${
-          zoom > 1.0 ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
-        }`}
+        className="relative w-full overflow-hidden rounded-lg bg-zinc-950 border border-zinc-800 flex justify-center items-center min-h-[420px]"
       >
-        <canvas ref={canvasRef} className="rounded-lg shadow-inner max-w-full" />
+        <canvas
+          ref={canvasRef}
+          onClick={handleCanvasClick}
+          onMouseMove={handleCanvasMouseMove}
+          className="rounded-lg shadow-inner max-w-full"
+        />
+
+        {/* Bounding Box Attribution Popover / Modal */}
+        {clickedFace && (
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-30 flex items-center justify-center p-4 animate-in fade-in duration-150">
+            <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 max-w-md w-full shadow-2xl space-y-4">
+              <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <UserCheck className="w-5 h-5 text-cyan-400" />
+                  <h3 className="font-bold text-zinc-100 text-sm">Assign Visual Crop to Student</h3>
+                </div>
+                <button
+                  onClick={() => setClickedFace(null)}
+                  className="p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 rounded-lg transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-3 bg-zinc-900/80 rounded-xl border border-zinc-800 text-xs space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Current Identification</span>
+                  <span className="font-semibold text-zinc-200">{clickedFace.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Match Confidence</span>
+                  <span className="font-mono text-cyan-400 font-bold">{Math.round(clickedFace.confidence * 100)}%</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Crop ID</span>
+                  <span className="font-mono text-zinc-400 text-[11px]">{clickedFace.crop_id || 'Detection Crop'}</span>
+                </div>
+              </div>
+
+              {/* Roster Student Selector */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                  Select Enrolled Student Roster
+                </label>
+                <select
+                  value={targetStudentId}
+                  onChange={(e) => setTargetStudentId(e.target.value)}
+                  className="w-full bg-zinc-900 border border-zinc-800 text-zinc-100 text-xs rounded-xl p-2.5 outline-none focus:ring-1 focus:ring-cyan-500"
+                >
+                  <option value="">-- Choose Student to Assign --</option>
+                  {roster.map((s) => (
+                    <option key={s.student_id} value={s.student_id}>
+                      {s.name} ({s.roll_number}) &bull; Current: {s.status}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+                <button
+                  onClick={() => setClickedFace(null)}
+                  className="px-3 py-2 rounded-xl bg-zinc-900 text-zinc-300 text-xs font-semibold hover:bg-zinc-800 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleExecuteAssignment}
+                  disabled={!targetStudentId}
+                  className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-semibold transition flex items-center gap-1.5 shadow-lg shadow-cyan-600/20"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  Assign to Student &amp; Mark Present
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

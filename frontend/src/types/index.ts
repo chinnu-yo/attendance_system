@@ -1,4 +1,5 @@
 export interface DetectedFace {
+  crop_id?: string;
   bbox: [number, number, number, number]; // [x1, y1, x2, y2]
   matched_student_id: string | null;
   roll_number: string | null;
@@ -34,6 +35,7 @@ export interface ProcessAttendanceResponse {
   session_summary: SessionSummary;
   processed_images: ProcessedImage[];
   roster: RosterStudent[];
+  session_token?: string;
 }
 
 export interface EnrollStudentResponse {
@@ -51,9 +53,16 @@ export interface CommitRecordItem {
   override_reason?: string;
 }
 
+export interface CropAssignment {
+  student_id: string;
+  crop_id: string;
+}
+
 export interface CommitAttendancePayload {
   course_id: string;
   records: CommitRecordItem[];
+  assignments?: CropAssignment[];
+  session_token?: string;
 }
 
 export interface CommitAttendanceResponse {
